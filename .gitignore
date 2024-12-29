@@ -1,0 +1,21 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+myenv/
+
+# Environment variables
+.env
+
+# Streamlit secrets and config
+.streamlit/
+
+# Files directory
+files/
+
+# JSON files
+*.json
+
+main.py
