@@ -131,7 +131,7 @@ Current question: {question}
             model=model_id,
             contents=prompt,
             config=GenerateContentConfig(
-                tools=[google_search_tool],
+                # tools=[google_search_tool],
                 response_modalities=["TEXT"],
             ),
         )
