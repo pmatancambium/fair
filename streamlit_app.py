@@ -562,107 +562,321 @@ def main():
     # Display conversation history
     for message in st.session_state.conversation_history:
         with st.chat_message(message["role"]):
-            # Detect if the content contains Hebrew
-            has_hebrew = any("\u0590" <= c <= "\u05FF" for c in message["content"])
-            st.markdown(
-                format_message(message["content"], is_hebrew=has_hebrew),
-                unsafe_allow_html=True,
-            )
+            # For assistant messages, split content and sources
+            if message["role"] == "assistant" and "context" in message:
+                parts = message["content"].split("מקורות:")
+                main_content = parts[0].strip()
+                sources = parts[1].strip() if len(parts) > 1 else ""
 
-            # Add expander for context
-            if "context" in message:
-                with st.expander("📜 הצג שיחות קודמות רלוונטיות"):
-                    # Display formatted context
-                    st.markdown(
-                        format_context_display(message["context"]),
-                        unsafe_allow_html=True,
-                    )
+                # Display main content
+                has_hebrew = any("\u0590" <= c <= "\u05FF" for c in main_content)
+                st.markdown(
+                    format_message(main_content, is_hebrew=has_hebrew),
+                    unsafe_allow_html=True,
+                )
+
+                # Display sources in an expander
+                if sources:
+                    with st.expander("📚 מקורות ואסמכתאות"):
+                        for line in sources.split("\n"):
+                            if line.strip():
+                                citation_match = re.match(
+                                    r"\[(\d+)\] שיחה מתאריך (\d{4}-\d{2}-\d{2})", line
+                                )
+                                if citation_match:
+                                    citation_num = citation_match.group(1)
+                                    date = citation_match.group(2)
+
+                                    cited_conv = next(
+                                        (
+                                            conv
+                                            for conv in message["context"]
+                                            if conv["timestamp"].startswith(date)
+                                        ),
+                                        None,
+                                    )
+
+                                    if cited_conv:
+                                        st.markdown("---")
+                                        st.markdown(f"### ציטוט [{citation_num}]")
+                                        st.markdown(
+                                            f"**תאריך:** {cited_conv['timestamp']}"
+                                        )
+
+                                        for msg in cited_conv["conversation"]:
+                                            is_user = any(
+                                                user_role in msg["role"].lower()
+                                                for user_role in [
+                                                    "user",
+                                                    "customer",
+                                                    "client",
+                                                    "human",
+                                                ]
+                                            )
+
+                                            role_icon = "👤" if is_user else "🤖"
+                                            role_name = "לקוח" if is_user else "נציג"
+                                            bg_color = (
+                                                "#f5f5f5" if is_user else "#e3f2fd"
+                                            )
+
+                                            st.markdown(
+                                                f"""
+                                                <div style='padding: 10px; border-radius: 5px; margin: 5px 0;
+                                                    background-color: {bg_color}'>
+                                                    <strong>{role_icon} {role_name}</strong><br>
+                                                    {msg["content"]}
+                                                </div>
+                                                """,
+                                                unsafe_allow_html=True,
+                                            )
+            else:
+                # For user messages, just display the content
+                has_hebrew = any("\u0590" <= c <= "\u05FF" for c in message["content"])
+                st.markdown(
+                    format_message(message["content"], is_hebrew=has_hebrew),
+                    unsafe_allow_html=True,
+                )
 
     # Chat input with RTL support
     question = st.chat_input("שאל שאלה על השיחות...")
 
     if question:
+        # Get fresh context for the new question
+        query_embedding = get_embedding(question)
+        similar_convs = find_similar_conversations(
+            collection=collection,
+            query_embedding=query_embedding,
+            query_text=question,
+            contact_id=selected_client,
+            n=100,
+            vector_weight=0.1,
+            text_weight=0.9,
+            min_text_score=0.7,
+        )
+
+        # Format the new context
+        new_context = format_context(similar_convs) if similar_convs else []
+
         # Display user message
         with st.chat_message("user"):
             st.markdown(format_message(question), unsafe_allow_html=True)
 
-        # Process the question
+        # Add user message to history without context
+        st.session_state.conversation_history.append(
+            {"role": "user", "content": question}
+        )
+
+        # Process the question with fresh context
         with st.chat_message("assistant"):
             with st.spinner("מעבד..."):
-                # Get embeddings and find similar conversations
-                query_embedding = get_embedding(question)
-                similar_convs = find_similar_conversations(
-                    collection=collection,
-                    query_embedding=query_embedding,
-                    query_text=question,  # This is the question text
-                    contact_id=selected_client,  # This is the selected client ID
-                    n=100,
-                    vector_weight=0.1,
-                    text_weight=0.9,
-                    min_text_score=0.7,
-                )
-
                 if not similar_convs:
                     response_text = f"לא נמצאו שיחות עבור לקוח {selected_client}"
                     st.warning(format_message(response_text), unsafe_allow_html=True)
                 else:
-                    # Format context and get response
-                    context = format_context(similar_convs)
+                    # Get response using conversation history but new context
                     response = get_gemini_response(
-                        question, context, st.session_state.conversation_history
+                        question,
+                        new_context,  # Use the fresh context
+                        st.session_state.conversation_history,  # Pass full conversation history
                     )
 
-                    # Create tabs for different views
-                    # response_tab, context_tab, raw_tab = st.tabs(
-                    #     ["✍️ תשובה", "💬 שיחות מעובדות", "📊 נתונים גולמיים"]
-                    # )
+                    # Split and display current response with sources
+                    parts = response["text"].split("מקורות:")
+                    main_content = parts[0].strip()
+                    sources = parts[1].strip() if len(parts) > 1 else ""
 
-                    # with response_tab:
-                    display_response_with_citations(response["text"], context)
-                    # with response_tab:
-                    #     # Display the main response text with RTL support
-                    #     st.markdown(
-                    #         format_message(response["text"]), unsafe_allow_html=True
-                    #     )
-                    #
-                    #     # Display search entry point if available
-                    #     if response["search_entry_point"]:
-                    #         st.markdown(
-                    #             format_message(
-                    #                 response["search_entry_point"], is_hebrew=False
-                    #             ),
-                    #             unsafe_allow_html=True,
-                    #         )
+                    # Display main content
+                    st.markdown(format_message(main_content), unsafe_allow_html=True)
 
-                    # with context_tab:
-                    #     # Wrap the context display in a container div for RTL support
-                    #     context_html = f"""
-                    #     <div dir="rtl" style="direction: rtl; text-align: right;">
-                    #         {format_context_display(context)}
-                    #     </div>
-                    #     """
-                    #     st.components.v1.html(context_html, height=400, scrolling=True)
-                    #
-                    # with raw_tab:
-                    #     # Wrap the raw context display in a container div for RTL support
-                    #     raw_html = f"""
-                    #     <div dir="rtl" style="direction: rtl; text-align: right;">
-                    #         {format_raw_context(similar_convs)}
-                    #     </div>
-                    #     """
-                    #     st.components.v1.html(raw_html, height=400, scrolling=True)
+                    # Display sources in an expander
+                    if sources:
+                        with st.expander("📚 מקורות ואסמכתאות"):
+                            for line in sources.split("\n"):
+                                if line.strip():
+                                    citation_match = re.match(
+                                        r"\[(\d+)\] שיחה מתאריך (\d{4}-\d{2}-\d{2})",
+                                        line,
+                                    )
+                                    if citation_match:
+                                        citation_num = citation_match.group(1)
+                                        date = citation_match.group(2)
 
-                    # Store in conversation history with context
-                    st.session_state.conversation_history.append(
-                        {"role": "user", "content": question}
-                    )
+                                        cited_conv = next(
+                                            (
+                                                conv
+                                                for conv in new_context
+                                                if conv["timestamp"].startswith(date)
+                                            ),
+                                            None,
+                                        )
+
+                                        if cited_conv:
+                                            st.markdown("---")
+                                            st.markdown(f"### ציטוט [{citation_num}]")
+                                            st.markdown(
+                                                f"**תאריך:** {cited_conv['timestamp']}"
+                                            )
+
+                                            for msg in cited_conv["conversation"]:
+                                                is_user = any(
+                                                    user_role in msg["role"].lower()
+                                                    for user_role in [
+                                                        "user",
+                                                        "customer",
+                                                        "client",
+                                                        "human",
+                                                    ]
+                                                )
+
+                                                role_icon = "👤" if is_user else "🤖"
+                                                role_name = (
+                                                    "לקוח" if is_user else "נציג"
+                                                )
+                                                bg_color = (
+                                                    "#f5f5f5" if is_user else "#e3f2fd"
+                                                )
+
+                                                st.markdown(
+                                                    f"""
+                                                    <div style='padding: 10px; border-radius: 5px; margin: 5px 0;
+                                                        background-color: {bg_color}'>
+                                                        <strong>{role_icon} {role_name}</strong><br>
+                                                        {msg["content"]}
+                                                    </div>
+                                                    """,
+                                                    unsafe_allow_html=True,
+                                                )
+
+                    # Add assistant response to history with the new context
                     st.session_state.conversation_history.append(
                         {
                             "role": "assistant",
                             "content": response["text"],
-                            "context": context,
+                            "context": new_context,  # Store the fresh context
                         }
                     )
+
+
+# def main():
+#     # Check authentication before showing the main app
+#     if not authenticate():
+#         return
+#     st.title("💬 ניתוח צ'אט תמיכת לקוחות")
+#
+#     # Initialize MongoDB connection
+#     collection = init_mongodb()
+#
+#     # Sidebar for client selection
+#     with st.sidebar:
+#         st.title("בחירת לקוח")
+#         clients = get_all_clients(collection)
+#         selected_client = st.selectbox("בחר מזהה לקוח:", clients)
+#
+#     # Display conversation history
+#     for message in st.session_state.conversation_history:
+#         with st.chat_message(message["role"]):
+#             # Detect if the content contains Hebrew
+#             has_hebrew = any("\u0590" <= c <= "\u05FF" for c in message["content"])
+#             st.markdown(
+#                 format_message(message["content"], is_hebrew=has_hebrew),
+#                 unsafe_allow_html=True,
+#             )
+#
+#             # Add expander for context
+#             if "context" in message:
+#                 with st.expander("📜 הצג שיחות קודמות רלוונטיות"):
+#                     # Display formatted context
+#                     st.markdown(
+#                         format_context_display(message["context"]),
+#                         unsafe_allow_html=True,
+#                     )
+#
+#     # Chat input with RTL support
+#     question = st.chat_input("שאל שאלה על השיחות...")
+#
+#     if question:
+#         # Display user message
+#         with st.chat_message("user"):
+#             st.markdown(format_message(question), unsafe_allow_html=True)
+#
+#         # Process the question
+#         with st.chat_message("assistant"):
+#             with st.spinner("מעבד..."):
+#                 # Get embeddings and find similar conversations
+#                 query_embedding = get_embedding(question)
+#                 similar_convs = find_similar_conversations(
+#                     collection=collection,
+#                     query_embedding=query_embedding,
+#                     query_text=question,  # This is the question text
+#                     contact_id=selected_client,  # This is the selected client ID
+#                     n=100,
+#                     vector_weight=0.1,
+#                     text_weight=0.9,
+#                     min_text_score=0.7,
+#                 )
+#
+#                 if not similar_convs:
+#                     response_text = f"לא נמצאו שיחות עבור לקוח {selected_client}"
+#                     st.warning(format_message(response_text), unsafe_allow_html=True)
+#                 else:
+#                     # Format context and get response
+#                     context = format_context(similar_convs)
+#                     response = get_gemini_response(
+#                         question, context, st.session_state.conversation_history
+#                     )
+#
+#                     # Create tabs for different views
+#                     # response_tab, context_tab, raw_tab = st.tabs(
+#                     #     ["✍️ תשובה", "💬 שיחות מעובדות", "📊 נתונים גולמיים"]
+#                     # )
+#
+#                     # with response_tab:
+#                     display_response_with_citations(response["text"], context)
+#                     # with response_tab:
+#                     #     # Display the main response text with RTL support
+#                     #     st.markdown(
+#                     #         format_message(response["text"]), unsafe_allow_html=True
+#                     #     )
+#                     #
+#                     #     # Display search entry point if available
+#                     #     if response["search_entry_point"]:
+#                     #         st.markdown(
+#                     #             format_message(
+#                     #                 response["search_entry_point"], is_hebrew=False
+#                     #             ),
+#                     #             unsafe_allow_html=True,
+#                     #         )
+#
+#                     # with context_tab:
+#                     #     # Wrap the context display in a container div for RTL support
+#                     #     context_html = f"""
+#                     #     <div dir="rtl" style="direction: rtl; text-align: right;">
+#                     #         {format_context_display(context)}
+#                     #     </div>
+#                     #     """
+#                     #     st.components.v1.html(context_html, height=400, scrolling=True)
+#                     #
+#                     # with raw_tab:
+#                     #     # Wrap the raw context display in a container div for RTL support
+#                     #     raw_html = f"""
+#                     #     <div dir="rtl" style="direction: rtl; text-align: right;">
+#                     #         {format_raw_context(similar_convs)}
+#                     #     </div>
+#                     #     """
+#                     #     st.components.v1.html(raw_html, height=400, scrolling=True)
+#
+#                     # Store in conversation history with context
+#                     st.session_state.conversation_history.append(
+#                         {"role": "user", "content": question}
+#                     )
+#                     st.session_state.conversation_history.append(
+#                         {
+#                             "role": "assistant",
+#                             "content": response["text"],
+#                             "context": context,
+#                         }
+#                     )
 
 
 if __name__ == "__main__":
