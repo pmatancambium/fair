@@ -592,7 +592,14 @@ def main():
                 # Get embeddings and find similar conversations
                 query_embedding = get_embedding(question)
                 similar_convs = find_similar_conversations(
-                    collection, query_embedding, question, selected_client
+                    collection=collection,
+                    query_embedding=query_embedding,
+                    query_text=question,  # This is the question text
+                    contact_id=selected_client,  # This is the selected client ID
+                    n=100,
+                    vector_weight=0.1,
+                    text_weight=0.9,
+                    min_text_score=0.7,
                 )
 
                 if not similar_convs:
