@@ -19,3 +19,4 @@ files/
 *.json
 
 main.py
+delete_collection.py

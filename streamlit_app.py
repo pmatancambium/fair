@@ -1,6 +1,7 @@
 import streamlit as st
 from dotenv import load_dotenv
 import os
+import re
 from datetime import datetime
 import html
 from functions import (
@@ -302,6 +303,43 @@ st.markdown(
     ::-webkit-scrollbar-thumb:hover {
         background: #666;
     }
+/* Citation styling */
+    .citation-number {
+        display: inline-block;
+        background-color: #e3f2fd;
+        color: #1976d2;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+        margin: 0 4px;
+        cursor: pointer;
+    }
+
+    .source-container {
+        border-left: 3px solid #1976d2;
+        padding-left: 10px;
+        margin: 10px 0;
+    }
+
+    .source-header {
+        font-weight: bold;
+        color: #1976d2;
+        margin-bottom: 5px;
+    }
+
+    .message-container {
+        padding: 10px;
+        border-radius: 5px;
+        margin: 5px 0;
+    }
+
+    .user-message {
+        background-color: #f5f5f5;
+    }
+
+    .assistant-message {
+        background-color: #e3f2fd;
+    }
 </style>
 """,
     unsafe_allow_html=True,
@@ -445,6 +483,67 @@ def format_raw_context(similar_convs):
     return html_output
 
 
+def display_response_with_citations(response_text, context):
+    # Split the response into main content and sources
+    parts = response_text.split("מקורות:")
+    main_content = parts[0].strip()
+    sources = parts[1].strip() if len(parts) > 1 else ""
+
+    # Display main content
+    st.markdown(format_message(main_content), unsafe_allow_html=True)
+
+    # Display sources in an expander
+    with st.expander("📚 מקורות ואסמכתאות"):
+        # Parse and display each source with the full conversation
+        for line in sources.split("\n"):
+            if line.strip():
+                # Extract citation number and date
+                citation_match = re.match(
+                    r"\[(\d+)\] שיחה מתאריך (\d{4}-\d{2}-\d{2})", line
+                )
+                if citation_match:
+                    citation_num = citation_match.group(1)
+                    date = citation_match.group(2)
+
+                    # Find the corresponding conversation in context
+                    cited_conv = next(
+                        (
+                            conv
+                            for conv in context
+                            if conv["timestamp"].startswith(date)
+                        ),
+                        None,
+                    )
+
+                    if cited_conv:
+                        st.markdown("---")
+                        st.markdown(f"### ציטוט [{citation_num}]")
+                        st.markdown(f"**תאריך:** {cited_conv['timestamp']}")
+
+                        # Display the conversation messages
+                        for msg in cited_conv["conversation"]:
+                            # Check if the role contains any user-related keywords
+                            is_user = any(
+                                user_role in msg["role"].lower()
+                                for user_role in ["user", "customer", "client", "human"]
+                            )
+
+                            role_icon = "👤" if is_user else "🤖"
+                            role_name = "לקוח" if is_user else "נציג"
+                            bg_color = "#f5f5f5" if is_user else "#e3f2fd"
+
+                            st.markdown(
+                                f"""
+                                <div style='padding: 10px; border-radius: 5px; margin: 5px 0;
+                                    background-color: {bg_color}'>
+                                    <strong>{role_icon} {role_name}</strong><br>
+                                    {msg["content"]}
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+
+
 def main():
     # Check authentication before showing the main app
     if not authenticate():
@@ -493,7 +592,7 @@ def main():
                 # Get embeddings and find similar conversations
                 query_embedding = get_embedding(question)
                 similar_convs = find_similar_conversations(
-                    collection, query_embedding, selected_client
+                    collection, query_embedding, question, selected_client
                 )
 
                 if not similar_convs:
@@ -507,42 +606,44 @@ def main():
                     )
 
                     # Create tabs for different views
-                    response_tab, context_tab, raw_tab = st.tabs(
-                        ["✍️ תשובה", "💬 שיחות מעובדות", "📊 נתונים גולמיים"]
-                    )
+                    # response_tab, context_tab, raw_tab = st.tabs(
+                    #     ["✍️ תשובה", "💬 שיחות מעובדות", "📊 נתונים גולמיים"]
+                    # )
 
-                    with response_tab:
-                        # Display the main response text with RTL support
-                        st.markdown(
-                            format_message(response["text"]), unsafe_allow_html=True
-                        )
+                    # with response_tab:
+                    display_response_with_citations(response["text"], context)
+                    # with response_tab:
+                    #     # Display the main response text with RTL support
+                    #     st.markdown(
+                    #         format_message(response["text"]), unsafe_allow_html=True
+                    #     )
+                    #
+                    #     # Display search entry point if available
+                    #     if response["search_entry_point"]:
+                    #         st.markdown(
+                    #             format_message(
+                    #                 response["search_entry_point"], is_hebrew=False
+                    #             ),
+                    #             unsafe_allow_html=True,
+                    #         )
 
-                        # Display search entry point if available
-                        if response["search_entry_point"]:
-                            st.markdown(
-                                format_message(
-                                    response["search_entry_point"], is_hebrew=False
-                                ),
-                                unsafe_allow_html=True,
-                            )
-
-                    with context_tab:
-                        # Wrap the context display in a container div for RTL support
-                        context_html = f"""
-                        <div dir="rtl" style="direction: rtl; text-align: right;">
-                            {format_context_display(context)}
-                        </div>
-                        """
-                        st.components.v1.html(context_html, height=400, scrolling=True)
-
-                    with raw_tab:
-                        # Wrap the raw context display in a container div for RTL support
-                        raw_html = f"""
-                        <div dir="rtl" style="direction: rtl; text-align: right;">
-                            {format_raw_context(similar_convs)}
-                        </div>
-                        """
-                        st.components.v1.html(raw_html, height=400, scrolling=True)
+                    # with context_tab:
+                    #     # Wrap the context display in a container div for RTL support
+                    #     context_html = f"""
+                    #     <div dir="rtl" style="direction: rtl; text-align: right;">
+                    #         {format_context_display(context)}
+                    #     </div>
+                    #     """
+                    #     st.components.v1.html(context_html, height=400, scrolling=True)
+                    #
+                    # with raw_tab:
+                    #     # Wrap the raw context display in a container div for RTL support
+                    #     raw_html = f"""
+                    #     <div dir="rtl" style="direction: rtl; text-align: right;">
+                    #         {format_raw_context(similar_convs)}
+                    #     </div>
+                    #     """
+                    #     st.components.v1.html(raw_html, height=400, scrolling=True)
 
                     # Store in conversation history with context
                     st.session_state.conversation_history.append(

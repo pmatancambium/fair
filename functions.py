@@ -21,6 +21,7 @@ MONGODB_URI = st.secrets["MONGODB_URI"]
 genaiEmb.configure(api_key=GEMINI_API_KEY)
 client = genai.Client(api_key=GEMINI_API_KEY)
 model_id = "gemini-2.0-flash-exp"
+# model_id = "gemini-1.5-pro"
 
 # Initialize Google Search tool
 google_search_tool = Tool(google_search=GoogleSearch())
@@ -46,35 +47,145 @@ def get_all_clients(collection):
     return sorted([int(cid) for cid in clients])
 
 
-def find_similar_conversations(collection, query_embedding, contact_id, n=10):
-    """Find similar conversations using vector search"""
+def find_similar_conversations(
+    collection,
+    query_embedding,
+    query_text,
+    contact_id,
+    n=100,
+    vector_weight=0.1,
+    text_weight=0.9,
+    min_text_score=0.7,
+):
+    """Find similar conversations using weighted combination of vector and text search"""
     contact_id = int(contact_id)
-    results = collection.aggregate(
-        [
-            {
-                "$vectorSearch": {
-                    "index": "vector_index",
-                    "path": "embedding",
-                    "queryVector": query_embedding,
-                    "numCandidates": 100,
-                    "limit": n,
-                    "filter": {"contact_id": {"$eq": contact_id}},
-                }
-            },
-            {
-                "$project": {
+
+    try:
+        # First try vector search only to see if it works
+        vector_results = list(
+            collection.aggregate(
+                [
+                    {
+                        "$vectorSearch": {
+                            "index": "vector_index",
+                            "path": "embedding",
+                            "queryVector": query_embedding,
+                            "numCandidates": 100,
+                            "limit": n,
+                            "filter": {"contact_id": {"$eq": contact_id}},
+                        }
+                    },
+                    {
+                        "$addFields": {
+                            "search_score": {"$meta": "vectorSearchScore"},
+                            "vector_score": {"$meta": "vectorSearchScore"},
+                            "text_score": {"$literal": 0},
+                        }
+                    },
+                ]
+            )
+        )
+
+        # If vector search worked, try to enhance with text search
+        try:
+            text_results = list(
+                collection.aggregate(
+                    [
+                        {
+                            "$search": {
+                                "index": "text_index",
+                                "text": {
+                                    "query": query_text,
+                                    "path": {"wildcard": "*"},
+                                    "score": {"boost": {"value": text_weight}},
+                                },
+                            }
+                        },
+                        {"$match": {"contact_id": contact_id}},
+                        {
+                            "$addFields": {
+                                "search_score": {"$meta": "searchScore"},
+                                "vector_score": {"$literal": 0},
+                                "text_score": {"$meta": "searchScore"},
+                            }
+                        },
+                        {"$limit": n},
+                    ]
+                )
+            )
+
+            # Combine results
+            all_results = vector_results + text_results
+
+            # Group by conversation_id and take the highest score
+            grouped_results = {}
+            for result in all_results:
+                conv_id = result["conversation_id"]
+                if (
+                    conv_id not in grouped_results
+                    or result["search_score"] > grouped_results[conv_id]["search_score"]
+                ):
+                    grouped_results[conv_id] = result
+
+            # Sort by combined score and take top n
+            final_results = sorted(
+                grouped_results.values(), key=lambda x: x["search_score"], reverse=True
+            )[:n]
+
+            return final_results
+
+        except Exception as text_error:
+            print(f"Text search error: {text_error}")
+            return vector_results
+
+    except Exception as e:
+        print(f"Vector search error: {e}")
+
+        # Fallback to basic find with contact_id filter
+        return list(
+            collection.find(
+                {"contact_id": contact_id},
+                {
                     "conversation_id": 1,
                     "contact_id": 1,
                     "start_time": 1,
                     "end_time": 1,
                     "messages": 1,
                     "text_for_embedding": 1,
-                    "search_score": {"$meta": "vectorSearchScore"},
-                }
-            },
-        ]
-    )
-    return list(results)
+                },
+            ).limit(n)
+        )
+
+
+# def find_similar_conversations(collection, query_embedding, contact_id, n=10):
+#     """Find similar conversations using vector search"""
+#     contact_id = int(contact_id)
+#     results = collection.aggregate(
+#         [
+#             {
+#                 "$vectorSearch": {
+#                     "index": "vector_index",
+#                     "path": "embedding",
+#                     "queryVector": query_embedding,
+#                     "numCandidates": 100,
+#                     "limit": n,
+#                     "filter": {"contact_id": {"$eq": contact_id}},
+#                 }
+#             },
+#             {
+#                 "$project": {
+#                     "conversation_id": 1,
+#                     "contact_id": 1,
+#                     "start_time": 1,
+#                     "end_time": 1,
+#                     "messages": 1,
+#                     "text_for_embedding": 1,
+#                     "search_score": {"$meta": "vectorSearchScore"},
+#                 }
+#             },
+#         ]
+#     )
+#     return list(results)
 
 
 def format_context(conversations):
@@ -118,13 +229,21 @@ def get_gemini_response(question, context, conversation_history=[]):
 
     prompt = f"""
 בהתבסס על ארכיון השיחות עם הלקוח שלנו ב-'fair: קרנות נאמנות אונליין'
-    {json.dumps(context, indent=2, ensure_ascii=False)}
+{json.dumps(context, indent=2, ensure_ascii=False)}
 
-{history_text}
+{history_text if conversation_history else ""}
 Current question: {question}
 
+ענה על השאלה תוך שימוש במידע מהשיחות. בסוף כל טענה או מידע, הוסף מספר בסוגריים מרובעות שמציין את מספר השיחה הרלוונטית, לדוגמה:
+"הלקוח ביקש עזרה בהעברת כספים [1]"
+
+בסוף התשובה, הוסף רשימת מקורות מפורטת בפורמט הבא:
+מקורות:
+[1] שיחה מתאריך YYYY-MM-DD: תיאור קצר של תוכן השיחה
+[2] שיחה מתאריך YYYY-MM-DD: תיאור קצר של תוכן השיחה
+
 אם הקונטקסט לא מכיל מידע רלוונטי - תאמר זאת.
-    """
+"""
 
     try:
         response = client.models.generate_content(
